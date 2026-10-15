@@ -1,6 +1,7 @@
 """Окно у трея, автозапуск и мост к интерфейсу."""
 
 import ctypes
+import subprocess
 import sys
 import threading
 import time
@@ -82,6 +83,24 @@ def _tray_image():
     return image
 
 
+def _spawn_self():
+    exe = Path(sys.executable)
+    if exe.name.lower() == "python.exe":
+        sibling = exe.with_name("pythonw.exe")
+        if sibling.exists():
+            exe = sibling
+    args = [str(exe), str(Path(__file__).resolve().parent / "volume.py")]
+    if "--background" in sys.argv:
+        args.append("--background")
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: новая копия живёт после выхода этой.
+    subprocess.Popen(
+        args,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        close_fds=True,
+    )
+
+
 def _message(text: str):
     ctypes.windll.user32.MessageBoxW(None, text, "Громкость", 0x10)
 
@@ -112,8 +131,9 @@ def run_app(background: bool):
         return
 
     show_event = kernel32.CreateEventW(None, True, False, "Local\\GromkostShow")
-    kernel32.CreateMutexW(None, False, "Local\\GromkostApp")
+    mutex = kernel32.CreateMutexW(None, False, "Local\\GromkostApp")
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(mutex)
         if not background:
             kernel32.SetEvent(show_event)
         return
@@ -236,16 +256,26 @@ def run_app(background: bool):
 
     def on_quit(_icon, _item):
         quitting["value"] = True
-        shutdown_audio()
+        if not quitting.get("stopped"):
+            shutdown_audio()
         try:
             window.destroy()
         except Exception:
             pass
         icon.stop()
 
+    def on_restart(_icon, _item):
+        # Имя мьютекса держит этот процесс. Закрыть до запуска, иначе новая копия сразу выйдет.
+        kernel32.CloseHandle(mutex)
+        shutdown_audio()
+        quitting["stopped"] = True
+        _spawn_self()
+        on_quit(_icon, _item)
+
     menu = pystray.Menu(
         pystray.MenuItem("Открыть", on_open, default=True),
         pystray.MenuItem("Автозапуск", on_toggle_autostart, checked=lambda _item: autostart_enabled()),
+        pystray.MenuItem("Перезапуск", on_restart),
         pystray.MenuItem("Выход", on_quit),
     )
     icon = pystray.Icon("gromkost", _tray_image(), "Громкость", menu)
