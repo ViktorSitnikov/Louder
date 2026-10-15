@@ -14,7 +14,7 @@ from pycaw.constants import DEVICE_STATE, AudioSessionState, EDataFlow
 from pycaw.pycaw import AudioUtilities
 from pycaw.utils import AudioSession
 
-from engine import boosters, ensure_boost, root_pids, stop_boost
+from engine import ATTEN, boosters, ensure_boost, root_pids, stop_boost
 from native import kernel32, psapi, user32
 
 _com_state = threading.local()
