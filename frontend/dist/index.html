@@ -5,12 +5,71 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Громкость</title>
     <style>
+      @font-face {
+        font-family: Montserrat;
+        src: url("./fonts/Montserrat-Regular.ttf") format("truetype");
+        font-weight: 400;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: Montserrat;
+        src: url("./fonts/Montserrat-Bold.ttf") format("truetype");
+        font-weight: 700;
+        font-style: normal;
+      }
+      :root {
+        --ink: #101114;
+        --card: #1a1c22;
+        --line: #2a2d36;
+        --text: #f3f1ec;
+        --muted: #8d919a;
+        --blue: #9eb6f0;
+        --warm: var(--accent, #e8a87c);
+      }
+      :root[data-theme="light"] {
+        --ink: #f3f1ec;
+        --card: #ffffff;
+        --line: #e0dcd4;
+        --text: #1d1f24;
+        --muted: #6b7079;
+        --blue: #3f64c8;
+        --warm: var(--accent, #c2652b);
+      }
+      [data-btn] {
+        border-radius: 8px;
+        transition: background-color 150ms;
+      }
+      [data-btn] svg {
+        transition: stroke 150ms;
+      }
+      [data-btn]:hover {
+        background-color: color-mix(in srgb, var(--warm) 14%, transparent);
+      }
+      [data-btn]:hover svg {
+        stroke: var(--warm);
+      }
+      input[type="color"] {
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border: 2px solid var(--line);
+        border-radius: 13px;
+        background: none;
+        cursor: pointer;
+      }
+      input[type="color"]::-webkit-color-swatch-wrapper {
+        padding: 0;
+      }
+      input[type="color"]::-webkit-color-swatch {
+        border: none;
+        border-radius: 11px;
+      }
       html,
       body,
       #root {
         margin: 0;
         height: 100%;
-        background: #101114;
+        background: var(--ink);
       }
       #root {
         display: flex;
@@ -21,8 +80,7 @@
       body {
         overflow: hidden;
         user-select: none;
-        scrollbar-width: thin;
-        scrollbar-color: #9eb6f0 transparent;
+        font-family: Montserrat, sans-serif;
       }
       ::-webkit-scrollbar {
         width: 10px;
@@ -32,15 +90,15 @@
         margin: 6px 0;
       }
       ::-webkit-scrollbar-thumb {
-        background: linear-gradient(180deg, #9eb6f0, #e8a87c);
-        border: 2px solid #101114;
+        background: color-mix(in srgb, var(--warm) 70%, transparent);
+        border: 2px solid var(--ink);
         border-radius: 99px;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: #e8a87c;
+        background: var(--warm);
       }
     </style>
-    <script type="module" crossorigin src="./assets/index-CP-6TPHU.js"></script>
+    <script type="module" crossorigin src="./assets/index-DuFTb4hI.js"></script>
   </head>
   <body>
     <div id="root"></div>

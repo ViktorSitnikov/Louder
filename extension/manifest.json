@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Громкость — мост вкладок",
+  "version": "1.0.24",
+  "description": "Передаёт выбранные вкладки в программу «Громкость» и выравнивает звук каждой отдельно.",
+  "permissions": ["tabs", "scripting", "storage"],
+  "host_permissions": ["http://127.0.0.1:47921/*", "<all_urls>"],
+  "action": {
+    "default_title": "Громкость",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["detect.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

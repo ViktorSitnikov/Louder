@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body { margin: 0; width: 320px; background: #101114; color: #f3f1ec; font: 13px/1.4 system-ui, sans-serif; }
+      main { padding: 14px; }
+      h1 { font-size: 16px; margin: 0 0 4px; }
+      .muted { color: #8d919a; margin: 0 0 12px; word-break: break-all; }
+      label { display: flex; gap: 8px; align-items: flex-start; }
+      ul { list-style: none; margin: 14px 0 0; padding: 0; }
+      li { display: flex; gap: 8px; align-items: center; border-top: 1px solid #2a2d36; padding: 8px 0; }
+      li span { flex: 1; word-break: break-all; color: #8d919a; }
+      button { border: 0; background: transparent; color: #e8a87c; cursor: pointer; font: inherit; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Громкость</h1>
+      <p class="muted" id="url">Нет адреса</p>
+      <label id="row"><input id="on" type="checkbox" /> Управлять вкладками с этим адресом</label>
+      <ul id="list"></ul>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -24,20 +24,20 @@ from ctypes.wintypes import BOOL, DWORD, HANDLE, WORD
 from pathlib import Path
 
 import comtypes
+import numpy as np
 import psutil
 from comtypes import COMMETHOD, COMObject, GUID, HRESULT, IUnknown
 from pycaw.pycaw import AudioUtilities, IAudioClient, WAVEFORMATEX
 
-from native import kernel32, mmdevapi
+from native import avrt, kernel32, mmdevapi
 
 RATE = 48000
 CHANNELS = 2
 BLOCK = 8  # float32 stereo
-MAX_GAIN = 6.0
 # Windows отдаёт loopback уже после ползунка программы. Держим его почти
 # на нуле и усиливаем копию. Ниже 1% движок начинает отдавать тишину.
 ATTEN = 0.01
-# ponytail: жёсткое ограничение на 1.0. Лимитер — если на 400%+ сильно хрипит.
+# ponytail: жёсткое ограничение на 1.0. Лимитер — если на пиках хрипит.
 # ponytail: один поток захвата на процесс. Хватает на несколько программ.
 
 AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
@@ -180,25 +180,50 @@ class _Activation(Structure):
     _fields_ = [("ActivationType", DWORD), ("TargetProcessId", DWORD), ("ProcessLoopbackMode", DWORD)]
 
 
-def scale(data: bytes, gain: float) -> bytes:
-    if gain == 1.0 or not data:
+def gain_for(env: float, low_db: float, high_db: float) -> float:
+    # Уровень в дБ относительно потолка (0 дБ — максимум без искажений).
+    # Тише low поднимаем к нему, громче high прижимаем к нему. Шум у цифр нуля не разгоняем.
+    # ponytail: усиление не больше 30 дБ, иначе поднимается шипение.
+    low_db = max(-60.0, min(0.0, low_db))
+    high_db = max(low_db, min(0.0, high_db))
+    if env < 1e-5:
+        return 1.0
+    level = 20.0 * math.log10(env)
+    if level < low_db:
+        target = low_db
+    elif level > high_db:
+        target = high_db
+    else:
+        return 1.0
+    gain = 10 ** ((target - level) / 20.0)
+    return max(0.0, min(10 ** (30.0 / 20.0), gain))
+
+
+def scale(data: bytes, gain: float, prev_gain: float | None = None) -> bytes:
+    if not data:
         return data
-    samples = array.array("f")
-    samples.frombytes(data[: len(data) - (len(data) % 4)])
-    for i, sample in enumerate(samples):
-        value = sample * gain
-        if value > 1.0:
-            value = 1.0
-        elif value < -1.0:
-            value = -1.0
-        samples[i] = value
-    return samples.tobytes()
+    if prev_gain is None:
+        prev_gain = gain
+    if gain == 1.0 and prev_gain == 1.0:
+        return data
+    trimmed = data[: len(data) - (len(data) % 4)]
+    samples = np.frombuffer(trimmed, dtype=np.float32)
+    if abs(gain - prev_gain) > 1e-3 and samples.size >= CHANNELS:
+        frames = samples.size // CHANNELS
+        ramp = np.linspace(prev_gain, gain, frames, dtype=np.float32)
+        out = samples.reshape(frames, CHANNELS) * ramp[:, None]
+        np.clip(out, -1.0, 1.0, out=out)
+        return out.tobytes()
+    out = np.clip(samples * np.float32(gain), -1.0, 1.0)
+    return out.tobytes()
 
 
 def pcm_peak(data: bytes) -> float:
-    samples = array.array("f")
-    samples.frombytes(data[: len(data) - (len(data) % 4)])
-    return max((abs(sample) for sample in samples), default=0.0)
+    trimmed = data[: len(data) - (len(data) % 4)]
+    if not trimmed:
+        return 0.0
+    samples = np.frombuffer(trimmed, dtype=np.float32)
+    return float(np.max(np.abs(samples)))
 
 
 def _pcm_format() -> WAVEFORMATEX:
@@ -282,7 +307,9 @@ class Capture:
             ptr, got, flags, _pos, _qpc = self.capture.GetBuffer()
             got = int(got)
             try:
-                if not (int(flags) & AUDCLNT_BUFFERFLAGS_SILENT):
+                if int(flags) & AUDCLNT_BUFFERFLAGS_SILENT:
+                    chunks.append(b"\x00" * (got * BLOCK))
+                elif got > 0:
                     chunks.append(string_at(_addr(ptr), got * BLOCK))
             finally:
                 self.capture.ReleaseBuffer(got)
@@ -310,7 +337,7 @@ class Render:
         self.client = raw.QueryInterface(IAudioClient)
         self.fmt = _pcm_format()
         flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-        self.client.Initialize(0, flags, 200000, 0, self.fmt, None)
+        self.client.Initialize(0, flags, 600000, 0, self.fmt, None)
         self.buffer_frames = int(self.client.GetBufferSize())
         self.render = self.client.GetService(IAudioRenderClient._iid_).QueryInterface(
             IAudioRenderClient
@@ -321,8 +348,8 @@ class Render:
     def write(self, data: bytes):
         self.pending.extend(data)
         # ponytail: если поток не успевает, старое выбрасывается — задержка не копится.
-        cap = RATE * BLOCK * 200 // 1000
-        keep = RATE * BLOCK * 60 // 1000
+        cap = RATE * BLOCK * 100 // 1000
+        keep = RATE * BLOCK * 40 // 1000
         if len(self.pending) > cap:
             drop = len(self.pending) - keep
             del self.pending[: drop - (drop % BLOCK)]
@@ -349,9 +376,13 @@ class Render:
 
 
 class Booster:
-    def __init__(self, pid: int, gain: float):
+    def __init__(self, pid: int, low: float, high: float, boost: int = 100):
         self.pid = pid
-        self.gain = gain
+        self.low = low
+        self.high = high
+        self.boost = boost
+        self.env = 0.0
+        self.prev_gain = None
         self.error = None
         self.ready = threading.Event()
         self.t0 = 0.0
@@ -369,6 +400,9 @@ class Booster:
             self.stop()
             raise RuntimeError(self.error or "усиление остановилось")
 
+    def alive(self) -> bool:
+        return self.thread.is_alive() and not self.error
+
     def stop(self):
         self._stop.set()
         if self.stop_event:
@@ -381,6 +415,8 @@ class Booster:
 
     def _run(self):
         comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)
+        task_idx = DWORD(0)
+        mmcss = avrt.AvSetMmThreadCharacteristicsW("Pro Audio", byref(task_idx))
         cap = ren = None
         try:
             cap = Capture(self.pid)
@@ -394,7 +430,7 @@ class Booster:
                     break
                 data = cap.read()
                 if data:
-                    ren.write(scale(data, self._factor()))
+                    ren.write(self._process(data))
         except Exception as exc:
             self.error = str(exc)
         finally:
@@ -402,44 +438,76 @@ class Booster:
                 ren.close()
             if cap is not None:
                 cap.close()
+            if mmcss:
+                avrt.AvRevertMmThreadCharacteristics(mmcss)
             self.ready.set()
             comtypes.CoUninitialize()
 
-    def _factor(self) -> float:
-        factor = self.gain / ATTEN
+    def _process(self, data: bytes) -> bytes:
+        peak = pcm_peak(data) / ATTEN
+        if peak > self.env:
+            self.env += (peak - self.env) * 0.6
+        else:
+            self.env += (peak - self.env) * 0.15
+        gain = gain_for(self.env, self.low, self.high) * self.boost / 100.0 / ATTEN
         # Громкость в микшере меняется не мгновенно — иначе первый момент орёт.
         warm = time.time() - self.t0
         if warm < 0.15:
-            factor *= warm / 0.15
-        return factor
+            gain *= warm / 0.15
+        out = scale(data, gain, self.prev_gain)
+        self.prev_gain = gain
+        return out
 
 
 boosters: dict[int, Booster] = {}
+_ppid_cache: dict[int, int] = {}
+
+
+def _ppid(pid: int) -> int:
+    if pid in _ppid_cache:
+        return _ppid_cache[pid]
+    try:
+        ppid = psutil.Process(pid).ppid()
+    except Exception:
+        ppid = 0
+    _ppid_cache[pid] = ppid
+    return ppid
 
 
 def root_pids(pids) -> list[int]:
     """Корень дерева процессов: захват родителя уже включает детей."""
     alive = {pid for pid in pids if pid}
+    if len(alive) <= 1:
+        return list(alive)
     roots = []
     for pid in alive:
-        try:
-            parents = {parent.pid for parent in psutil.Process(pid).parents()}
-        except Exception:
-            parents = set()
-        if parents.isdisjoint(alive):
+        cur = _ppid(pid)
+        seen = {pid}
+        is_child = False
+        while cur and cur not in seen:
+            if cur in alive:
+                is_child = True
+                break
+            seen.add(cur)
+            cur = _ppid(cur)
+        if not is_child:
             roots.append(pid)
     return roots
 
 
-def ensure_boost(pid: int, gain: float):
-    gain = max(0.0, min(MAX_GAIN, gain))
+def ensure_boost(pid: int, low: float, high: float, boost: int = 100):
+    low = max(-60.0, min(0.0, low))
+    high = max(low, min(0.0, high))
+    boost = max(0, min(600, int(boost)))
     current = boosters.get(pid)
     if current and current.thread.is_alive() and not current.error:
-        current.gain = gain
+        current.low = low
+        current.high = high
+        current.boost = boost
         return
     if current:
         stop_boost(pid)
-    booster = Booster(pid, gain)
+    booster = Booster(pid, low, high, boost)
     boosters[pid] = booster
     try:
         booster.start()
@@ -517,6 +585,10 @@ def _set_session_volume(pid: int, level: float):
 
 
 def demo():
+    assert math.isclose(gain_for(0.1, -40, -6), 1.0)
+    assert math.isclose(gain_for(1.0, -40, -6), 10 ** (-6 / 20), rel_tol=1e-3)
+    assert gain_for(0.001, -20, -6) > 10
+    assert math.isclose(gain_for(1e-8, -20, -6), 1.0)
     loud = array.array("f", [0.8, -0.8]).tobytes()
     got = array.array("f")
     got.frombytes(scale(loud, 2))
